@@ -1,8 +1,9 @@
 fastapi
 uvicorn
 yfinance
-pandas
-streamlit
+pandas>=2.1
+streamlit>=1.50
 requests
 lxml
 html5lib
+jinja2
