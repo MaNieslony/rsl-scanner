@@ -1,3 +1,5 @@
+import json
+
 import streamlit as st
 import requests
 import pandas as pd
@@ -6,7 +8,7 @@ from io import StringIO
 API = "http://localhost:8000"
 
 STATIC_PRESETS = {
-    "DAX 40": "ADS.DE,AIR.DE,ALV.DE,BAS.DE,BAYN.DE,BMW.DE,BNR.DE,CON.DE,1COV.DE,DTG.DE,DB1.DE,DBK.DE,DHL.DE,DTE.DE,ENR.DE,EOAN.DE,FRE.DE,FME.DE,HNR1.DE,HEI.DE,HEN3.DE,IFX.DE,LIN,MBG.DE,MRK.DE,MTX.DE,MUV2.DE,NTGY.DE,PAH3.DE,P911.DE,QIA.DE,RHM.DE,RWE.DE,SAP.DE,SHL.DE,SIE.DE,SY1.DE,VNA.DE,VOW3.DE,ZAL.DE",
+    "DAX 40": "ADS.DE,AIR.DE,ALV.DE,BAS.DE,BAYN.DE,BEI.DE,BMW.DE,BNR.DE,CBK.DE,CON.DE,1COV.DE,DTG.DE,DB1.DE,DBK.DE,DHL.DE,DTE.DE,ENR.DE,EOAN.DE,FRE.DE,FME.DE,HNR1.DE,HEI.DE,HEN3.DE,IFX.DE,MBG.DE,MRK.DE,MTX.DE,MUV2.DE,NEM.DE,PAH3.DE,P911.DE,QIA.DE,RHM.DE,RWE.DE,SAP.DE,SHL.DE,SIE.DE,SY1.DE,VNA.DE,VOW3.DE,ZAL.DE",
     "US Large Cap": "AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA,AVGO,BRK-B,JPM,V,UNH,XOM,JNJ,PG,MA,HD,COST,ABBV,KO,MRK,LLY,CVX,BAC,PFE,TMO,WMT,CSCO,ACN,NFLX",
     "ETFs": "SPY,QQQ,IWM,EFA,EEM,GLD,TLT,HYG,LQD,VNQ,XLK,XLF,XLE,XLV,XLY,XLP,ARKK,SOXX,XBI,MCHI",
 }
@@ -24,30 +26,31 @@ def load_sp500() -> list[str]:
 
 st.set_page_config(page_title="RSL Scanner", page_icon="📈", layout="wide")
 st.title("📈 RSL Scanner")
-st.caption("Relative Stärke nach Robert A. Levy · aktueller Kurs ÷ Ø der letzten 26 Wochenschlusskurse")
+st.caption("Relative Stärke nach Robert A. Levy · letzter Wochenschlusskurs ÷ Ø der letzten N Wochenschlusskurse (abgeschlossene Wochen)")
 
 with st.sidebar:
     st.header("Einstellungen")
 
     preset = st.selectbox("Preset laden", ["— kein Preset —"] + list(STATIC_PRESETS.keys()) + ["S&P 500"])
 
+    # Text-Area nur bei einem Preset-Wechsel überschreiben, sonst bleibt die
+    # eigene Eingabe erhalten.
+    if st.session_state.get("_last_preset") != preset:
+        st.session_state["_last_preset"] = preset
+        if preset == "S&P 500":
+            try:
+                st.session_state["ticker_input"] = ",".join(load_sp500())
+            except Exception as e:
+                st.error(f"Fehler beim Laden: {e}")
+        elif preset in STATIC_PRESETS:
+            st.session_state["ticker_input"] = STATIC_PRESETS[preset]
+
     if preset == "S&P 500":
-        try:
-            sp500 = load_sp500()
-            default_tickers = ",".join(sp500)
-            st.success(f"✅ {len(sp500)} Ticker geladen ({pd.Timestamp.now().strftime('%d.%m.%Y')})")
-            st.info("Scan dauert 5–10 Minuten.")
-        except Exception as e:
-            st.error(f"Fehler beim Laden: {e}")
-            default_tickers = ""
-    elif preset in STATIC_PRESETS:
-        default_tickers = STATIC_PRESETS[preset]
-    else:
-        default_tickers = st.session_state.get("ticker_input", "")
+        st.info("Scan dauert 5–10 Minuten.")
 
     ticker_input = st.text_area(
         "Ticker-Symbole",
-        value=default_tickers,
+        key="ticker_input",
         height=160,
         help="Komma- oder zeilengetrennt, Yahoo Finance Format"
     )
@@ -72,13 +75,14 @@ with st.sidebar:
         format_func=lambda x: "Alle" if x == 0 else f"Top {x}",
         index=3
     )
-    sectors = st.multiselect("Sektor-Filter", options=[
-        "Technology", "Health Care", "Financials", "Consumer Discretionary",
-        "Industrials", "Communication Services", "Consumer Staples",
-        "Energy", "Utilities", "Real Estate", "Materials"
-    ])
+    sector_options = sorted({r.get("sector", "—") for r in st.session_state.get("results", [])})
+    sectors = st.multiselect(
+        "Sektor-Filter",
+        options=sector_options,
+        placeholder="Erst nach einem Scan verfügbar" if not sector_options else "Sektoren wählen",
+    )
 
-    scan_btn = st.button("🚀 Scan starten", type="primary", use_container_width=True)
+    scan_btn = st.button("🚀 Scan starten", type="primary", width="stretch")
 
 # --- Ticker-Vorschau vor dem Scan ---
 if ticker_input and not scan_btn and "results" not in st.session_state:
@@ -90,7 +94,9 @@ if ticker_input and not scan_btn and "results" not in st.session_state:
 
 # --- Scan mit Fortschrittsbalken ---
 if scan_btn:
-    tickers = [t.strip().upper() for t in ticker_input.replace("\n", ",").split(",") if t.strip()]
+    tickers = list(dict.fromkeys(
+        t.strip().upper() for t in ticker_input.replace("\n", ",").split(",") if t.strip()
+    ))
     if not tickers:
         st.warning("Keine Ticker eingegeben.")
     else:
@@ -110,7 +116,6 @@ if scan_btn:
                 for line in resp.iter_lines():
                     if not line:
                         continue
-                    import json
                     msg = json.loads(line)
                     if msg["type"] == "progress":
                         done, total = msg["done"], msg["total"]
@@ -121,9 +126,12 @@ if scan_btn:
                         results.append(msg)
 
             progress_bar.progress(1.0, text="Fertig ✅")
+            if not results:
+                st.warning("Für keinen Ticker konnten Daten geladen werden (Symbol prüfen, Yahoo-Format z.B. SAP.DE).")
             status_text.caption(f"{len(results)} von {len(tickers)} erfolgreich gescannt")
             st.session_state["results"] = results
             st.session_state["scan_info"] = f"{len(results)} von {len(tickers)} erfolgreich"
+            st.rerun()  # Sektor-Optionen in der Sidebar aktualisieren
 
         except requests.exceptions.ConnectionError:
             st.error("Backend nicht erreichbar – läuft uvicorn auf Port 8000?")
@@ -134,12 +142,12 @@ if scan_btn:
 if "results" in st.session_state and st.session_state["results"]:
     results = st.session_state["results"]
 
-    df = pd.DataFrame(results)
+    df = pd.DataFrame(results).sort_values("rsl", ascending=False).reset_index(drop=True)
+    df.insert(0, "rank", range(1, len(df) + 1))
     if only_strong:
         df = df[df["rsl"] > 1.0]
     if sectors:
         df = df[df["sector"].isin(sectors)]
-    df = df.sort_values("rsl", ascending=False).reset_index(drop=True)
     if top_n > 0:
         df = df.head(top_n)
 
@@ -157,9 +165,9 @@ if "results" in st.session_state and st.session_state["results"]:
 
     st.divider()
 
-    display = df[["ticker", "name", "sector", "rsl", "change_1d", "change_1w", "change_1m"]].copy()
-    display.insert(0, "Rang", range(1, len(display) + 1))
-    display.columns = ["Rang", "Symbol", "Name", "Sektor", "RSL", "%1T", "%1W", "%1M"]
+    display = df[["rank", "ticker", "name", "sector", "price", "currency", "rsl",
+                  "change_1d", "change_1w", "change_1m"]].copy()
+    display.columns = ["Rang", "Symbol", "Name", "Sektor", "Kurs", "Whg.", "RSL", "%1T", "%1W", "%1M"]
 
     def color_rsl(val):
         if isinstance(val, float):
@@ -173,9 +181,10 @@ if "results" in st.session_state and st.session_state["results"]:
 
     styled = (
         display.style
-        .applymap(color_rsl, subset=["RSL"])
-        .applymap(color_pct, subset=["%1T", "%1W", "%1M"])
+        .map(color_rsl, subset=["RSL"])
+        .map(color_pct, subset=["%1T", "%1W", "%1M"])
         .format({
+            "Kurs": "{:.2f}",
             "RSL": "{:.4f}",
             "%1T": "{:+.2f}%",
             "%1W": "{:+.2f}%",
@@ -183,7 +192,7 @@ if "results" in st.session_state and st.session_state["results"]:
         })
     )
 
-    st.dataframe(styled, use_container_width=True, height=620, hide_index=True)
+    st.dataframe(styled, width="stretch", height=620, hide_index=True)
 
     csv = display.to_csv(index=False).encode("utf-8-sig")
     st.download_button(
